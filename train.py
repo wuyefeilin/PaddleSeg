@@ -139,8 +139,7 @@ def main(args):
         log_iters=args.log_iters,
         num_workers=args.num_workers,
         use_vdl=args.use_vdl,
-        losses=losses,
-        keep_checkpoint_max=args.keep_checkpoint_max)
+        losses=losses)
 
 
 if __name__ == '__main__':

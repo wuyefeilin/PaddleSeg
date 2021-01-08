@@ -15,6 +15,9 @@
 import os
 import glob
 
+import numpy as np
+from PIL import Image
+
 from paddleseg.datasets import Dataset
 from paddleseg.cvlibs import manager
 from paddleseg.transforms import Compose
@@ -43,19 +46,59 @@ class Cityscapes(Dataset):
     Args:
         transforms (list): Transforms for image.
         dataset_root (str): Cityscapes dataset directory.
-        mode (str, optional): Which part of dataset to use. it is one of ('train', 'val', 'test'). Default: 'train'.
-        edge (bool, optional): Whether to compute edge while training. Default: False
+        mode (str): Which part of dataset to use. it is one of ('train', 'val', 'test'). Default: 'train'.
     """
 
-    def __init__(self, transforms, dataset_root, mode='train', edge=False):
+    ID_MAP = {
+        0: 255,
+        1: 255,
+        2: 255,
+        3: 255,
+        4: 255,
+        5: 255,
+        6: 255,
+        7: 0,
+        8: 0,
+        9: 255,
+        10: 255,
+        11: 0,
+        12: 0,
+        13: 0,
+        14: 255,
+        15: 255,
+        16: 255,
+        17: 0,
+        18: 255,
+        19: 0,
+        20: 0,
+        21: 0,
+        22: 0,
+        23: 0,
+        24: 1,
+        25: 2,
+        26: 3,
+        27: 4,
+        28: 5,
+        29: 255,
+        30: 255,
+        31: 6,
+        32: 7,
+        33: 8
+    }
+
+    def __init__(self,
+                 transforms,
+                 dataset_root,
+                 mode='train',
+                 load_instance='True'):
         self.dataset_root = dataset_root
         self.transforms = Compose(transforms)
         self.file_list = list()
         mode = mode.lower()
         self.mode = mode
-        self.num_classes = 19
+        self.num_classes = 9
         self.ignore_index = 255
-        self.edge = edge
+        self.load_instance = load_instance
 
         if mode not in ['train', 'val', 'test']:
             raise ValueError(
@@ -74,13 +117,42 @@ class Cityscapes(Dataset):
                 "The dataset is not Found or the folder structure is nonconfoumance."
             )
 
+        pattern = '*_gtFine_instanceIds.png' if load_instance else '*_gtFine_labelTrainIds.png'
         label_files = sorted(
-            glob.glob(
-                os.path.join(label_dir, mode, '*',
-                             '*_gtFine_labelTrainIds.png')))
+            glob.glob(os.path.join(label_dir, mode, '*', pattern)))
         img_files = sorted(
             glob.glob(os.path.join(img_dir, mode, '*', '*_leftImg8bit.png')))
 
         self.file_list = [[
             img_path, label_path
         ] for img_path, label_path in zip(img_files, label_files)]
+
+    def __getitem__(self, idx):
+        image_path, label_path = self.file_list[idx]
+        if self.mode == 'test':
+            im, _ = self.transforms(im=image_path)
+            im = im[np.newaxis, ...]
+            return im, image_path
+        elif self.mode == 'val':
+            im, _ = self.transforms(im=image_path)
+            label = np.asarray(Image.open(label_path))
+            label = label[np.newaxis, :, :]
+            seg_map, instance_map = self.gen_instance_label(label)
+            return im, seg_map, instance_map
+        else:
+            im, label = self.transforms(im=image_path, label=label_path)
+            seg_map, instance_map = self.gen_instance_label(label)
+            return im, seg_map, instance_map
+
+    def gen_instance_label(self, label):
+        instance_mask = (label > 1000).astype('int32')
+        seg_mask = 1 - instance_mask
+        seg_map = seg_mask * label + (instance_mask * label) // 1000
+        instance_cnt = np.unique(label * instance_mask)
+        instance_map = label * instance_mask
+        for _idx, id in enumerate(instance_cnt):
+            instance_map[instance_map == id] = _idx
+
+        for key, value in Cityscapes.ID_MAP.items():
+            seg_map[seg_map == key] = value
+        return seg_map, instance_map
