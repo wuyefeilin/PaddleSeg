@@ -78,10 +78,11 @@ class InstanceFCN(nn.Layer):
             x.shape[2:],
             mode='bilinear',
             align_corners=self.align_corners)
-
-        return seg_pred, instance_pred
-        # instance_map = self.clustering(seg_pred, instance_pred)
-        # return seg_pred, instance_map
+        if self.training:
+            return seg_pred, instance_pred
+        else:
+            instance_map = self.clustering(seg_pred, instance_pred)
+            return seg_pred, instance_map
 
     def init_weight(self):
         if self.pretrained is not None:
@@ -163,8 +164,8 @@ class InstanceFCN(nn.Layer):
                     while paddle.norm(
                             center - last_center, p=2).numpy()[0] > 1e-4:
                         distance = instance_pred[i] - center
-                        distance = paddle.norm(distance, p=2, axis=2)
-                        dismask = (distance < 1.5).astype('int32')**2
+                        distance = paddle.norm(distance, p=2, axis=2)**2
+                        dismask = (distance < 1.5).astype('int32')
                         last_center = center
                         cnt = paddle.sum(dismask * segmask * insmask)
                         center = paddle.sum(
@@ -173,8 +174,8 @@ class InstanceFCN(nn.Layer):
                             axis=[0, 1]) / cnt
 
                     distance = instance_pred[i] - center
-                    distance = paddle.norm(distance, p=2, axis=2)
-                    dismask = (distance < 1.5).astype('int32')**2
+                    distance = paddle.norm(distance, p=2, axis=2)**2
+                    dismask = (distance < 1.5).astype('int32')
                     iop = (paddle.sum((1 - insmask) * dismask * segmask) /
                            paddle.sum(dismask * segmask)).numpy()[0]
 
