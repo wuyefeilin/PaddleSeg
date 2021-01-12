@@ -19,7 +19,6 @@ import numpy as np
 import paddle
 
 from paddleseg import utils
-from paddleseg.core import infer
 from paddleseg.utils import logger, progbar
 
 
@@ -34,14 +33,7 @@ def predict(model,
             transforms,
             image_list,
             image_dir=None,
-            save_dir='output',
-            aug_pred=False,
-            scales=1.0,
-            flip_horizontal=True,
-            flip_vertical=False,
-            is_slide=False,
-            stride=None,
-            crop_size=None):
+            save_dir='output'):
     """
     predict and visualize the image_list.
 
@@ -65,34 +57,22 @@ def predict(model,
     progbar_pred = progbar.Progbar(target=len(image_list), verbose=1)
     for i, im_path in enumerate(image_list):
         im = cv2.imread(im_path)
-        ori_shape = im.shape[:2]
         im, _ = transforms(im)
         im = im[np.newaxis, ...]
         im = paddle.to_tensor(im)
 
-        if aug_pred:
-            pred = infer.aug_inference(
-                model,
-                im,
-                ori_shape=ori_shape,
-                transforms=transforms.transforms,
-                scales=scales,
-                flip_horizontal=flip_horizontal,
-                flip_vertical=flip_vertical,
-                is_slide=is_slide,
-                stride=stride,
-                crop_size=crop_size)
-        else:
-            pred = infer.inference(
-                model,
-                im,
-                ori_shape=ori_shape,
-                transforms=transforms.transforms,
-                is_slide=is_slide,
-                stride=stride,
-                crop_size=crop_size)
-        pred = paddle.squeeze(pred)
-        pred = pred.numpy().astype('uint8')
+        seg_pred, ins_pred = model(im)
+        # convert value of ins_pre 1001, 1002, ...,2001, ... to 1,2,3,...
+        print(ins_pred.shape)
+        ins_pred = paddle.squeeze(ins_pred, axis=0)
+        ins_pred = ins_pred.numpy()
+        ins_cnt = np.unique(ins_pred)
+        for _idx, id in enumerate(ins_cnt):
+            if id == 0:
+                continue
+            ins_pred[ins_pred == id] = _idx
+
+        ins_pred = ins_pred.astype('uint8')
 
         # get the saved name
         if image_dir is not None:
@@ -103,21 +83,16 @@ def predict(model,
             im_file = im_file[1:]
 
         # save added image
-        added_image = utils.visualize.visualize(im_path, pred, weight=0.6)
+        added_image = utils.visualize.visualize(im_path, ins_pred, weight=0.6)
         added_image_path = os.path.join(added_saved_dir, im_file)
         mkdir(added_image_path)
         cv2.imwrite(added_image_path, added_image)
 
         # save pseudo color prediction
-        pred_mask = utils.visualize.get_pseudo_color_map(pred)
+        pred_mask = utils.visualize.get_pseudo_color_map(ins_pred)
         pred_saved_path = os.path.join(pred_saved_dir,
                                        im_file.rsplit(".")[0] + ".png")
         mkdir(pred_saved_path)
         pred_mask.save(pred_saved_path)
-
-        # pred_im = utils.visualize(im_path, pred, weight=0.0)
-        # pred_saved_path = os.path.join(pred_saved_dir, im_file)
-        # mkdir(pred_saved_path)
-        # cv2.imwrite(pred_saved_path, pred_im)
 
         progbar_pred.update(i + 1)

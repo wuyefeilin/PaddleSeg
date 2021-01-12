@@ -70,7 +70,7 @@ class DiscriminativeLoss(nn.Layer):
             variance = paddle.norm(logit - instance_mean, p=self.norm, axis=0)
             variance = paddle.clip(variance - self.delta_var, min=0)**2
             cnt = paddle.sum(instance_mask)
-            var_term += paddle.sum(variance * instance_mask) / cnt
+            var_term += paddle.sum(variance * instance_mask) / (cnt + self.ESP)
         return var_term / instance_cnt
 
     def _distance_term(self, instance_means):
@@ -101,7 +101,8 @@ class DiscriminativeLoss(nn.Layer):
             instance_mask = (label == int(instance_ids[_idx])).astype('int32')
             instance_pixels = paddle.sum(instance_mask)
             instance_mean = paddle.sum(
-                logit * instance_mask, axis=[1, 2]) / instance_pixels
+                logit * instance_mask, axis=[1, 2
+                                             ]) / (instance_pixels + self.ESP)
             instance_mean = instance_mean.unsqueeze(1)
             instance_means.append(instance_mean)
 

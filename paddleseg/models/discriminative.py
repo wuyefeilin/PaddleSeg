@@ -24,11 +24,11 @@ from paddleseg.models import layers
 @manager.MODELS.add_component
 class InstanceFCN(nn.Layer):
     """
-    A simple implementation for FCN based on PaddlePaddle.
+    A simple implementation for Instance Segmentation based on PaddlePaddle.
 
     The original article refers to
-    Evan Shelhamer, et, al. "Fully Convolutional Networks for Semantic Segmentation"
-    (https://arxiv.org/abs/1411.4038).
+    Bert De Brabandere, et, al. "Semantic Instance Segmentation with a Discriminative Loss Function"
+    (https://arxiv.org/pdf/1708.02551.pdf).
 
     Args:
         num_classes (int): The unique number of target classes.
@@ -37,6 +37,7 @@ class InstanceFCN(nn.Layer):
             Default: (-1, ).
         channels (int, optional): The channels between conv layer and the last layer of FCNHead.
             If None, it will be the number of channels of input features. Default: None.
+        spatial_dim (int, optional): The spatial dimentions for instance representation. Default: 8.
         align_corners (bool): An argument of F.interpolate. It should be set to False when the output size of feature
             is even, e.g. 1024x512, otherwise it is True, e.g. 769x769.  Default: False.
         pretrained (str, optional): The path or url of pretrained model. Default: None
@@ -81,7 +82,9 @@ class InstanceFCN(nn.Layer):
         if self.training:
             return seg_pred, instance_pred
         else:
-            instance_map = self.clustering(seg_pred, instance_pred)
+            instance_map = self.clustering_v2(seg_pred, instance_pred)
+            seg_pred = F.softmax(seg_pred)
+            # seg_pred: nchw, instance_map: nhw
             return seg_pred, instance_map
 
     def init_weight(self):
@@ -91,12 +94,11 @@ class InstanceFCN(nn.Layer):
     def clustering(self, seg_pred, instance_pred):
         n, c, h, w = seg_pred.shape
         _, s, _, _ = instance_pred.shape
-        seg_pred = paddle.argmax(seg_pred, axis=1)
         instance_pred = paddle.transpose(instance_pred, (0, 2, 3, 1))
         instance_map = paddle.zeros((n, h, w), dtype='int64')
         for i in range(n):
-            instance_id = 1
             for _ in range(1, c):
+                instance_id = 1
                 instance_maps = []
                 while True:
                     segmask = (seg_pred[i] == _).astype('int32')
@@ -124,11 +126,10 @@ class InstanceFCN(nn.Layer):
                     dis_indexs = paddle.nonzero(dismask * segmask * insmask)
                     instance_map[i] = paddle.scatter_nd_add(
                         instance_map[i], dis_indexs,
-                        paddle.to_tensor([instance_id] * len(dis_indexs)))
+                        paddle.to_tensor(
+                            [instance_id + _ * 1000] * len(dis_indexs)))
                     instance_id += 1
 
-                    print(instance_id)
-        print(paddle.unique(instance_map))
         return instance_map
 
     def clustering_v2(self, seg_pred, instance_pred):
@@ -138,8 +139,8 @@ class InstanceFCN(nn.Layer):
         instance_pred = paddle.transpose(instance_pred, (0, 2, 3, 1))
         instance_map = paddle.zeros((n, h, w), dtype='int64')
         for i in range(n):
-            instance_id = 1
             for _ in range(1, c):
+                instance_id = 1
                 segmask = (seg_pred[i] == _).astype('int32')
                 segcnt = paddle.sum(segmask).numpy()[0]
                 instance_maps = []
@@ -183,14 +184,13 @@ class InstanceFCN(nn.Layer):
                         dis_indexs = paddle.nonzero(dismask * segmask * insmask)
                         instance_map[i] = paddle.scatter_nd_add(
                             instance_map[i], dis_indexs,
-                            paddle.to_tensor([instance_id] * len(dis_indexs)))
+                            paddle.to_tensor(
+                                [instance_id + _ * 1000] * len(dis_indexs)))
                         instance_id += 1
                         counter = 0
-                        print(instance_id)
                     else:
                         counter += 1
 
-        print(paddle.unique(instance_map))
         return instance_map
 
 
@@ -202,9 +202,10 @@ class FCNHead(nn.Layer):
         num_classes (int): The unique number of target classes.
         backbone_indices (tuple, optional): The values in the tuple indicate the indices of output of backbone.
             Default: (-1, ).
+        backbone_channels (tuple): The same length with "backbone_indices". It indicates the channels of corresponding index.
         channels (int, optional): The channels between conv layer and the last layer of FCNHead.
             If None, it will be the number of channels of input features. Default: None.
-        pretrained (str, optional): The path of pretrained model. Default: None
+        spatial_dim (int, optional): The spatial dimentions for instance representation. Default: 8.
     """
 
     def __init__(self,

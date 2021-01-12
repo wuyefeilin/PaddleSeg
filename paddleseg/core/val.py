@@ -18,22 +18,13 @@ import numpy as np
 import paddle
 import paddle.nn.functional as F
 
-from paddleseg.utils import metrics, Timer, calculate_eta, logger, progbar
-from paddleseg.core import infer
+from paddleseg.utils import ins_metrics, Timer, calculate_eta, logger, progbar
 
 np.set_printoptions(suppress=True)
 
 
-def evaluate(model,
-             eval_dataset,
-             aug_eval=False,
-             scales=1.0,
-             flip_horizontal=True,
-             flip_vertical=False,
-             is_slide=False,
-             stride=None,
-             crop_size=None,
-             num_workers=0):
+# TODO multi gpus evaluation
+def evaluate(model, eval_dataset, num_workers=0):
     model.eval()
     nranks = paddle.distributed.ParallelEnv().nranks
     local_rank = paddle.distributed.ParallelEnv().local_rank
@@ -42,7 +33,9 @@ def evaluate(model,
         if not paddle.distributed.parallel.parallel_helper._is_parallel_ctx_initialized(
         ):
             paddle.distributed.init_parallel_env()
-    batch_sampler = paddle.io.DistributedBatchSampler(
+    # batch_sampler = paddle.io.DistributedBatchSampler(
+    #     eval_dataset, batch_size=1, shuffle=False, drop_last=False)
+    batch_sampler = paddle.io.BatchSampler(
         eval_dataset, batch_size=1, shuffle=False, drop_last=False)
     loader = paddle.io.DataLoader(
         eval_dataset,
@@ -52,85 +45,47 @@ def evaluate(model,
     )
 
     total_iters = len(loader)
-    intersect_area_all = 0
-    pred_area_all = 0
-    label_area_all = 0
+    metric_50 = ins_metrics.AveragePrecision(
+        eval_dataset.num_classes - 1,
+        overlaps=0.5)  # exclude 0 since it is background
+    metric = ins_metrics.AveragePrecision(
+        eval_dataset.num_classes - 1, overlaps=list(np.arange(
+            0.5, 1.0, 0.05)))  # exclude 0 since it is background
 
     logger.info("Start evaluating (total_samples={}, total_iters={})...".format(
         len(eval_dataset), total_iters))
     progbar_val = progbar.Progbar(target=total_iters, verbose=1)
     timer = Timer()
-    for iter, (im, label) in enumerate(loader):
+    for iter, data in enumerate(loader):
         reader_cost = timer.elapsed_time()
-        label = label.astype('int64')
+        im = data[0]
+        seg_label, ins_label = data[1].astype('int64'), data[2].astype('int64')
+        seg_pred, ins_pred = model(im)
 
-        ori_shape = label.shape[-2:]
-        if aug_eval:
-            pred = infer.aug_inference(
-                model,
-                im,
-                ori_shape=ori_shape,
-                transforms=eval_dataset.transforms.transforms,
-                scales=scales,
-                flip_horizontal=flip_horizontal,
-                flip_vertical=flip_vertical,
-                is_slide=is_slide,
-                stride=stride,
-                crop_size=crop_size)
-        else:
-            pred = infer.inference(
-                model,
-                im,
-                ori_shape=ori_shape,
-                transforms=eval_dataset.transforms.transforms,
-                is_slide=is_slide,
-                stride=stride,
-                crop_size=crop_size)
+        seg_label = seg_label.numpy()
+        ins_label = ins_label.numpy()
+        seg_pred = seg_pred.numpy()
+        ins_pred = ins_pred.numpy()
 
-        intersect_area, pred_area, label_area = metrics.calculate_area(
-            pred,
-            label,
-            eval_dataset.num_classes,
-            ignore_index=eval_dataset.ignore_index)
+        ignore_mask = seg_label == eval_dataset.ignore_index
+        for i in range(im.shape[0]):
+            gts = ins_metrics.convert_gt_map(seg_label[i], ins_label[i])
+            preds = ins_metrics.convert_pred_map(seg_pred[i], ins_pred[i])
+            metric_50.compute(preds, gts, ignore_mask=ignore_mask[i])
+            metric.compute(preds, gts, ignore_mask=ignore_mask[i])
 
-        # Gather from all ranks
-        if nranks > 1:
-            intersect_area_list = []
-            pred_area_list = []
-            label_area_list = []
-            paddle.distributed.all_gather(intersect_area_list, intersect_area)
-            paddle.distributed.all_gather(pred_area_list, pred_area)
-            paddle.distributed.all_gather(label_area_list, label_area)
-
-            # Some image has been evaluated and should be eliminated in last iter
-            if (iter + 1) * nranks > len(eval_dataset):
-                valid = len(eval_dataset) - iter * nranks
-                intersect_area_list = intersect_area_list[:valid]
-                pred_area_list = pred_area_list[:valid]
-                label_area_list = label_area_list[:valid]
-
-            for i in range(len(intersect_area_list)):
-                intersect_area_all = intersect_area_all + intersect_area_list[i]
-                pred_area_all = pred_area_all + pred_area_list[i]
-                label_area_all = label_area_all + label_area_list[i]
-        else:
-            intersect_area_all = intersect_area_all + intersect_area
-            pred_area_all = pred_area_all + pred_area
-            label_area_all = label_area_all + label_area
         batch_cost = timer.elapsed_time()
         timer.restart()
-
         if local_rank == 0:
             progbar_val.update(iter + 1, [('batch_cost', batch_cost),
                                           ('reader cost', reader_cost)])
 
-    class_iou, miou = metrics.mean_iou(intersect_area_all, pred_area_all,
-                                       label_area_all)
-    class_acc, acc = metrics.accuracy(intersect_area_all, pred_area_all)
-    kappa = metrics.kappa(intersect_area_all, pred_area_all, label_area_all)
-
-    logger.info("[EVAL] #Images={} mIoU={:.4f} Acc={:.4f} Kappa={:.4f} ".format(
-        len(eval_dataset), miou, acc, kappa))
-    logger.info("[EVAL] Class IoU: \n" + str(np.round(class_iou, 4)))
-    logger.info("[EVAL] Class Acc: \n" + str(np.round(class_acc, 4)))
-    return miou, acc
+    ap = metric.cal_ap()
+    map = metric.cal_map()
+    ap_50 = metric_50.cal_ap()
+    map_50 = metric_50.cal_map()
+    logger.info("[EVAL] #Images={} mAP={:.4f} mAP_50={:.4f}".format(
+        len(eval_dataset), map, map_50))
+    logger.info("[EVAL] Class AP: \n" + str(np.round(ap, 4)))
+    logger.info("[EVAL] Class AP_50: \n" + str(np.round(ap_50, 4)))
+    return map, map_50, ap, ap_50

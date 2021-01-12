@@ -99,7 +99,7 @@ def train(model,
     timer = Timer()
     avg_loss = 0.0
     iters_per_epoch = len(batch_sampler)
-    best_mean_iou = -1.0
+    best_map = -1.0
     best_model_iter = -1
     train_reader_cost = 0.0
     train_batch_cost = 0.0
@@ -116,12 +116,12 @@ def train(model,
             labels = data[1].astype('int64'), data[2].astype('int64')
             if nranks > 1:
                 logits = ddp_model(images)
-                loss = loss_computation(logits, labels, losses)
-                loss.backward()
             else:
                 logits = model(images)
-                loss = loss_computation(logits, labels, losses)
-                loss.backward()
+            loss = loss_computation(logits, labels, losses)
+
+            # TODO It will hang in 2.0.0rc1 version
+            loss.backward()
             optimizer.step()
             lr = optimizer.get_lr()
             if isinstance(optimizer._learning_rate,
@@ -152,13 +152,13 @@ def train(model,
                                           avg_train_reader_cost, iter)
                 avg_loss = 0.0
 
-            if (iter % save_interval == 0
-                    or iter == iters) and (val_dataset is not None):
-                num_workers = 1 if num_workers > 0 else 0
-                with paddle.fluid.dygraph.no_grad():
-                    mean_iou, acc = evaluate(
-                        model, val_dataset, num_workers=num_workers)
-                model.train()
+            # if (iter % save_interval == 0
+            #         or iter == iters) and (val_dataset is not None):
+            #     num_workers = 1 if num_workers > 0 else 0
+            #     with paddle.fluid.dygraph.no_grad():
+            #         map, map_50, ap, ap_50 = evaluate(
+            #             model, val_dataset, num_workers=num_workers)
+            #     model.train()
 
             if (iter % save_interval == 0 or iter == iters) and local_rank == 0:
                 current_save_dir = os.path.join(save_dir,
@@ -171,20 +171,24 @@ def train(model,
                             os.path.join(current_save_dir, 'model.pdopt'))
 
                 if val_dataset is not None:
-                    if mean_iou > best_mean_iou:
-                        best_mean_iou = mean_iou
+                    with paddle.fluid.dygraph.no_grad():
+                        map, map_50, ap, ap_50 = evaluate(
+                            model, val_dataset, num_workers=num_workers)
+                    model.train()
+                    if map > best_map:
+                        best_map = map
                         best_model_iter = iter
                         best_model_dir = os.path.join(save_dir, "best_model")
                         paddle.save(
                             model.state_dict(),
                             os.path.join(best_model_dir, 'model.pdparams'))
                     logger.info(
-                        '[EVAL] The model with the best validation mIoU ({:.4f}) was saved at iter {}.'
-                        .format(best_mean_iou, best_model_iter))
+                        '[EVAL] The model with the best validation mAP ({:.4f}) was saved at iter {}.'
+                        .format(best_map, best_model_iter))
 
                     if use_vdl:
-                        log_writer.add_scalar('Evaluate/mIoU', mean_iou, iter)
-                        log_writer.add_scalar('Evaluate/Acc', acc, iter)
+                        log_writer.add_scalar('Evaluate/mAP', map, iter)
+                        log_writer.add_scalar('Evaluate/mAP_50', map_50, iter)
             timer.restart()
 
     # Sleep for half a second to let dataloader release resources.
